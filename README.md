@@ -62,9 +62,9 @@ Razor is the timer half of an AI body double loop. You declare your intention, t
 
 ## Support
 
-If Razor is useful to you, consider supporting continued development:
+If Razor is useful to you, consider sponsoring continued development:
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/ku5e)
+[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?logo=github)](https://github.com/sponsors/ku5e)
 
 ---
 

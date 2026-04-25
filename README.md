@@ -7,7 +7,7 @@ Floating Pomodoro timer built for ADHD-pattern focus sessions. Part of the **Anc
 ## The Loop
 
 1. Hit **START** and declare what you are working on
-2. Work for 25 minutes — no other windows, no other tasks
+2. Work for 25 minutes, no other windows, no other tasks
 3. Timer ends: mark it **Done** or **Not Done**
 4. Report back to your AI body double
 5. Repeat

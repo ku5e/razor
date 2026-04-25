@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Razor Pomodoro Timer
-Floating widget. Collapsible. Skip, sound picker, model selector.
+Floating widget. Collapsible. Declare, work, report loop.
 """
 
+import datetime
 import json
 import platform
 import subprocess
@@ -26,9 +27,20 @@ try:
 except ImportError:
     HAS_PLAYSOUND = False
 
+import os
 import sys
-_BASE = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
-CONFIG_PATH = _BASE / "config.json"
+
+def _config_dir() -> Path:
+    if platform.system() == "Windows":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    else:
+        base = Path.home() / ".config"
+    d = base / "razor"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+CONFIG_PATH = _config_dir() / "config.json"
+LOG_DIR     = Path.home() / "Documents" / "razor"
 
 DEFAULT_CONFIG = {
     "mode": "25/5",
@@ -37,7 +49,7 @@ DEFAULT_CONFIG = {
         "50/10": {"work": 50, "break": 10},
     },
     "always_on_top": True,
-    "sound": "beep",          # "beep" | "silent" | "/path/to/file.wav"
+    "sound": "beep",
     "window_x": 100,
     "window_y": 100,
 }
@@ -51,6 +63,7 @@ C = {
     "text":   "#e0e0e0",
     "muted":  "#666666",
     "dim":    "#2a2a4a",
+    "done":   "#5CA65C",
 }
 
 SOUND_OPTIONS = ["beep", "silent", "custom..."]
@@ -59,7 +72,6 @@ SOUND_OPTIONS = ["beep", "silent", "custom..."]
 # ── Sound ─────────────────────────────────────────────────────────────────────
 
 def play_sound(sound: str):
-    """Play beep, silent, or a custom file path."""
     if sound == "silent" or sound == "custom...":
         return
     if sound == "beep":
@@ -78,7 +90,6 @@ def play_sound(sound: str):
         except Exception:
             pass
         return
-    # Custom file path
     path = Path(sound)
     if not path.exists():
         return
@@ -93,22 +104,76 @@ def play_sound(sound: str):
         pass
 
 
+# ── Declaration dialog ────────────────────────────────────────────────────────
+
+class _DeclarationDialog(ctk.CTkToplevel):
+    def __init__(self, parent, prefill=""):
+        super().__init__(parent)
+        self.result = None
+        self.title("Declare Your Task")
+        self.geometry("320x170")
+        self.resizable(False, False)
+        self.attributes("-topmost", True)
+        self.grab_set()
+        self.configure(fg_color=C["bg"])
+
+        ctk.CTkLabel(self, text="What are you working on?",
+                     font=("Arial", 13), text_color=C["text"]).pack(pady=(18, 8))
+
+        self.entry = ctk.CTkEntry(self, width=280, font=("Arial", 12),
+                                  fg_color=C["dim"], text_color=C["text"],
+                                  border_color=C["accent"])
+        self.entry.pack(padx=16)
+        if prefill:
+            self.entry.insert(0, prefill)
+            self.entry.select_range(0, "end")
+        self.entry.focus()
+        self.entry.bind("<Return>", lambda e: self._confirm())
+        self.entry.bind("<Escape>", lambda e: self._skip())
+
+        brow = ctk.CTkFrame(self, fg_color="transparent")
+        brow.pack(pady=14)
+        ctk.CTkButton(brow, text="Start", width=110,
+                      fg_color=C["work"], hover_color="#a03030",
+                      font=("Arial", 12, "bold"),
+                      command=self._confirm).pack(side="left", padx=6)
+        ctk.CTkButton(brow, text="Skip", width=90,
+                      fg_color=C["dim"], hover_color="#3a3a6a",
+                      text_color=C["muted"], font=("Arial", 11),
+                      command=self._skip).pack(side="left", padx=6)
+
+        self.wait_window()
+
+    def _confirm(self):
+        self.result = self.entry.get().strip() or None
+        self.destroy()
+
+    def _skip(self):
+        self.result = None
+        self.destroy()
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 
 class RazorTimer(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.cfg = self._load_config()
-        self.collapsed = False
-        self._expanded_h = 0
-        self.running = False
-        self.phase = "work"
-        self.session_count = 0
-        self.time_remaining = 0
+        self.cfg                  = self._load_config()
+        self.collapsed            = False
+        self._expanded_h          = 0
+        self.running              = False
+        self.phase                = "work"
+        self.session_count        = 0
+        self.time_remaining       = 0
+        self.current_task         = ""
+        self.current_task_time    = None
+        self._last_incomplete     = ""
+        self.session_log          = []
+        self._last_export_count   = 0
+        self._awaiting_completion = False
         self._setup_window()
         self._build_ui()
         self.reset_timer()
-        # Cache expanded height after first render
         self.after(100, self._cache_height)
 
     # ── Config ────────────────────────────────────────────────────────────────
@@ -120,8 +185,10 @@ class RazorTimer(ctk.CTk):
         return DEFAULT_CONFIG.copy()
 
     def _save_config(self):
-        with open(CONFIG_PATH, "w") as f:
+        tmp = CONFIG_PATH.with_suffix(".tmp")
+        with open(tmp, "w") as f:
             json.dump(self.cfg, f, indent=2)
+        tmp.replace(CONFIG_PATH)
 
     def _cache_height(self):
         self.update_idletasks()
@@ -134,7 +201,7 @@ class RazorTimer(ctk.CTk):
         self.overrideredirect(True)
         self.attributes("-topmost", self.cfg["always_on_top"])
         self.configure(fg_color=C["bg"])
-        self.geometry(f"300x420+{self.cfg['window_x']}+{self.cfg['window_y']}")
+        self.geometry(f"300x560+{self.cfg['window_x']}+{self.cfg['window_y']}")
         self._dx = self._dy = 0
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -165,13 +232,11 @@ class RazorTimer(ctk.CTk):
         self.lbl_bar_info.bind("<ButtonPress-1>", self._drag_start)
         self.lbl_bar_info.bind("<B1-Motion>", self._drag_move)
 
-        # Close
         ctk.CTkButton(self.bar, text="×", width=26, height=24,
                       font=("Arial", 14), fg_color="transparent",
                       hover_color="#8b0000", text_color=C["text"],
                       command=self._quit).pack(side="right", padx=2, pady=4)
 
-        # Expand/collapse — always in title bar
         self.btn_toggle = ctk.CTkButton(
             self.bar, text="▲", width=26, height=24,
             font=("Arial", 9), fg_color="transparent",
@@ -184,46 +249,76 @@ class RazorTimer(ctk.CTk):
         self.body = ctk.CTkFrame(self, fg_color=C["bg"], corner_radius=0)
         self.body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # Phase
         self.lbl_phase = ctk.CTkLabel(self.body, text="WORK SESSION",
                                       font=("Courier New", 12, "bold"),
                                       text_color=C["work"])
         self.lbl_phase.pack(pady=(12, 0))
 
-        # Countdown
         self.lbl_time = ctk.CTkLabel(self.body, text="25:00",
                                      font=("Courier New", 52, "bold"),
                                      text_color=C["text"])
-        self.lbl_time.pack(pady=(2, 8))
+        self.lbl_time.pack(pady=(2, 6))
 
-        # Controls row: START | RESET | SKIP
-        row = ctk.CTkFrame(self.body, fg_color="transparent")
-        row.pack(pady=4)
+        # Declaration — large, readable, prominent
+        self.lbl_declaration = ctk.CTkLabel(
+            self.body, text="", wraplength=268,
+            font=("Arial", 14), text_color=C["text"],
+            justify="center"
+        )
+        self.lbl_declaration.pack(pady=(0, 6))
+
+        # Normal controls row: START | RESET | ⏹ STOP | ⏭ SKIP
+        self.controls_row = ctk.CTkFrame(self.body, fg_color="transparent")
+        self.controls_row.pack(pady=4)
 
         self.btn_start = ctk.CTkButton(
-            row, text="START", width=88,
+            self.controls_row, text="START", width=80,
             font=("Courier New", 12, "bold"),
             fg_color=C["work"], hover_color="#a03030",
             command=self.toggle_timer
         )
-        self.btn_start.pack(side="left", padx=3)
+        self.btn_start.pack(side="left", padx=2)
 
-        ctk.CTkButton(row, text="RESET", width=68,
+        ctk.CTkButton(self.controls_row, text="RESET", width=62,
                       font=("Courier New", 11),
                       fg_color=C["accent"], hover_color="#1a4a8a",
-                      command=self.reset_timer).pack(side="left", padx=3)
+                      command=self.reset_timer).pack(side="left", padx=2)
 
-        ctk.CTkButton(row, text="⏭", width=40,
-                      font=("Arial", 14),
+        ctk.CTkButton(self.controls_row, text="⏹", width=36,
+                      font=("Arial", 13),
                       fg_color=C["dim"], hover_color="#3a3a6a",
                       text_color=C["muted"],
-                      command=self.skip_phase).pack(side="left", padx=3)
+                      command=self.stop_session).pack(side="left", padx=2)
 
-        # Session counter
+        ctk.CTkButton(self.controls_row, text="⏭", width=36,
+                      font=("Arial", 13),
+                      fg_color=C["dim"], hover_color="#3a3a6a",
+                      text_color=C["muted"],
+                      command=self.skip_phase).pack(side="left", padx=2)
+
+        # Completion row (shown when work phase ends with a declared task)
+        self.completion_row = ctk.CTkFrame(self.body, fg_color="transparent")
+
+        ctk.CTkButton(self.completion_row, text="✓ DONE", width=120,
+                      font=("Courier New", 11, "bold"),
+                      fg_color=C["done"], hover_color="#307830",
+                      command=lambda: self._log_completion(True)).pack(side="left", padx=4)
+
+        ctk.CTkButton(self.completion_row, text="✗ NOT DONE", width=120,
+                      font=("Courier New", 11),
+                      fg_color=C["dim"], hover_color="#3a3a6a",
+                      text_color=C["muted"],
+                      command=lambda: self._log_completion(False)).pack(side="left", padx=4)
+
         self.lbl_session = ctk.CTkLabel(self.body, text="Session 0",
                                         font=("Courier New", 10),
                                         text_color=C["muted"])
         self.lbl_session.pack(pady=(8, 2))
+
+        # Completed tasks list (hidden until first completion)
+        self.completed_frame = ctk.CTkScrollableFrame(
+            self.body, height=72, fg_color=C["dim"], corner_radius=6
+        )
 
         # Mode selector
         mrow = ctk.CTkFrame(self.body, fg_color="transparent")
@@ -234,21 +329,23 @@ class RazorTimer(ctk.CTk):
                                font=("Courier New", 10), text_color=C["text"],
                                command=self.change_mode).pack(side="left", padx=10)
 
-        # Divider
         ctk.CTkFrame(self.body, fg_color=C["dim"], height=1).pack(fill="x", pady=6)
 
-        # Settings row
         self._build_settings()
+
+        self.btn_export = ctk.CTkButton(
+            self.body, text="Export Session →", width=200, height=28,
+            font=("Courier New", 10), fg_color=C["accent"], hover_color="#1a4a8a",
+            command=self.export_session
+        )
 
     def _build_settings(self):
         srow = ctk.CTkFrame(self.body, fg_color="transparent")
         srow.pack(fill="x", pady=(0, 2))
 
-        # Sound label
         ctk.CTkLabel(srow, text="Sound:", font=("Courier New", 10),
                      text_color=C["muted"]).pack(side="left", padx=(4, 2))
 
-        # Resolve display value for dropdown
         saved = self.cfg.get("sound", "beep")
         display = saved if saved in ("beep", "silent") else "custom..."
         self.sound_var = ctk.StringVar(value=display)
@@ -259,13 +356,11 @@ class RazorTimer(ctk.CTk):
                           fg_color=C["accent"], button_color=C["dim"],
                           command=self._sound_changed).pack(side="left", padx=4)
 
-        # Always on top
         self.aot_var = ctk.BooleanVar(value=self.cfg["always_on_top"])
         ctk.CTkCheckBox(srow, text="Top", variable=self.aot_var,
                         font=("Courier New", 10), text_color=C["muted"],
                         width=50, command=self._toggle_aot).pack(side="right", padx=4)
 
-        # Custom file label (shows filename when custom is set)
         self.lbl_sound_file = ctk.CTkLabel(
             self.body, text=self._custom_sound_label(),
             font=("Courier New", 9), text_color=C["muted"]
@@ -297,18 +392,43 @@ class RazorTimer(ctk.CTk):
         label = "WORK" if self.phase == "work" else "BREAK"
         color = C["work"] if self.phase == "work" else C["break"]
         m, s = divmod(self.time_remaining, 60)
-        self.lbl_bar_info.configure(text=f"| {label}  {m:02d}:{s:02d}", text_color=color)
+        task_short = f" — {self.current_task[:20]}…" if len(self.current_task) > 20 else (f" — {self.current_task}" if self.current_task else "")
+        self.lbl_bar_info.configure(
+            text=f"| {label}  {m:02d}:{s:02d}{task_short}", text_color=color
+        )
+
+    # ── Declaration ───────────────────────────────────────────────────────────
+
+    def _ask_declaration(self):
+        dlg = _DeclarationDialog(self, prefill=self._last_incomplete)
+        task = dlg.result
+        if task:
+            self.current_task      = task
+            self.current_task_time = datetime.datetime.now()
+            self._last_incomplete  = ""
+            self._update_declaration_label()
+        self._start_ticking()
+
+    def _update_declaration_label(self):
+        self.lbl_declaration.configure(
+            text=f'"{self.current_task}"' if self.current_task else ""
+        )
 
     # ── Timer ─────────────────────────────────────────────────────────────────
 
     def reset_timer(self):
         self.running = False
+        self._awaiting_completion = False
         self.phase = "work"
+        self.current_task = ""
+        self.current_task_time = None
         work = self.cfg["modes"][self.cfg["mode"]]["work"]
         self.time_remaining = work * 60
+        self._show_controls()
         self.btn_start.configure(text="START", fg_color=C["work"], hover_color="#a03030")
         self.lbl_phase.configure(text="WORK SESSION", text_color=C["work"])
         self.lbl_time.configure(text=self._fmt(self.time_remaining), text_color=C["text"])
+        self._update_declaration_label()
         self._refresh_bar_info()
 
     def toggle_timer(self):
@@ -316,9 +436,29 @@ class RazorTimer(ctk.CTk):
             self.running = False
             self.btn_start.configure(text="RESUME")
         else:
-            self.running = True
-            self.btn_start.configure(text="PAUSE")
-            threading.Thread(target=self._tick, daemon=True).start()
+            if self.phase == "work" and not self.current_task:
+                self._ask_declaration()
+            else:
+                self._start_ticking()
+
+    def _start_ticking(self):
+        self.running = True
+        self.btn_start.configure(text="PAUSE")
+        threading.Thread(target=self._tick, daemon=True).start()
+
+    def stop_session(self):
+        """End current work phase early and trigger completion prompt."""
+        if not self.running and not self.current_task:
+            return
+        self.running = False
+        self.time_remaining = 0
+        if self.phase == "work" and self.current_task:
+            self._show_completion_buttons()
+            secs = self.cfg["modes"][self.cfg["mode"]]["break"] * 60
+            self.time_remaining = secs
+            self._update_display()
+        else:
+            self.after(50, self._phase_done)
 
     def skip_phase(self):
         self.running = False
@@ -346,22 +486,182 @@ class RazorTimer(ctk.CTk):
         if self.phase == "work":
             self.session_count += 1
             self.lbl_session.configure(text=f"Session {self.session_count}")
-            self.phase = "break"
-            secs = self.cfg["modes"][self.cfg["mode"]]["break"] * 60
-            self.lbl_phase.configure(text="BREAK", text_color=C["break"])
-            self.lbl_time.configure(text_color=C["break"])
-            self.btn_start.configure(text="START BREAK",
-                                     fg_color=C["break"], hover_color="#307830")
+            if self.current_task:
+                self._awaiting_completion = True
+                self._show_completion_buttons()
+                secs = self.cfg["modes"][self.cfg["mode"]]["break"] * 60
+                self.time_remaining = secs
+                self._update_display()
+            else:
+                self._transition_to_break()
         else:
-            self.phase = "work"
-            secs = self.cfg["modes"][self.cfg["mode"]]["work"] * 60
-            self.lbl_phase.configure(text="WORK SESSION", text_color=C["work"])
-            self.lbl_time.configure(text_color=C["text"])
-            self.btn_start.configure(text="START",
-                                     fg_color=C["work"], hover_color="#a03030")
+            self._transition_to_work()
 
+    def _transition_to_break(self):
+        self.phase = "break"
+        self.current_task = ""
+        self.current_task_time = None
+        secs = self.cfg["modes"][self.cfg["mode"]]["break"] * 60
         self.time_remaining = secs
+        self._show_controls()
+        self.lbl_phase.configure(text="BREAK", text_color=C["break"])
+        self.lbl_time.configure(text_color=C["break"])
+        self.btn_start.configure(text="START BREAK",
+                                 fg_color=C["break"], hover_color="#307830")
+        self._update_declaration_label()
         self._update_display()
+
+    def _transition_to_work(self):
+        self.phase = "work"
+        secs = self.cfg["modes"][self.cfg["mode"]]["work"] * 60
+        self.time_remaining = secs
+        self._show_controls()
+        self.lbl_phase.configure(text="WORK SESSION", text_color=C["work"])
+        self.lbl_time.configure(text_color=C["text"])
+        self.btn_start.configure(text="START",
+                                 fg_color=C["work"], hover_color="#a03030")
+        self._update_display()
+
+    # ── Completion flow ───────────────────────────────────────────────────────
+
+    def _show_completion_buttons(self):
+        self.controls_row.pack_forget()
+        self.completion_row.pack(pady=4)
+
+    def _show_controls(self):
+        self.completion_row.pack_forget()
+        self.controls_row.pack(pady=4)
+        self._awaiting_completion = False
+
+    def _log_completion(self, completed: bool):
+        entry = {
+            "task":         self.current_task,
+            "declared_at":  self.current_task_time.isoformat() if self.current_task_time else "",
+            "completed_at": datetime.datetime.now().isoformat(),
+            "completed":    completed,
+        }
+        self.session_log.append(entry)
+        if not completed:
+            self._last_incomplete = self.current_task
+        else:
+            self._last_incomplete = ""
+        self._add_completed_item(entry)
+        self._update_export_btn()
+        self._transition_to_break()
+
+    def _add_completed_item(self, entry: dict):
+        icon  = "✓" if entry["completed"] else "✗"
+        color = C["done"] if entry["completed"] else C["muted"]
+        text  = f"{icon}  {entry['task']}"
+        ctk.CTkLabel(
+            self.completed_frame, text=text,
+            font=("Arial", 11), text_color=color,
+            anchor="w", justify="left"
+        ).pack(fill="x", padx=6, pady=1)
+        if len(self.session_log) == 1:
+            self.completed_frame.pack(fill="x", pady=(2, 4))
+            self.after(60, self._grow_for_list)
+
+    def _grow_for_list(self):
+        self.update_idletasks()
+        req = self.winfo_reqheight()
+        if req > self.winfo_height():
+            self._expanded_h = req
+            if not self.collapsed:
+                self.geometry(f"300x{req}+{self.winfo_x()}+{self.winfo_y()}")
+
+    # ── Export ────────────────────────────────────────────────────────────────
+
+    def _has_unexported(self):
+        return len(self.session_log) > self._last_export_count
+
+    def _update_export_btn(self):
+        if self._has_unexported():
+            self.btn_export.pack(pady=(4, 6))
+        else:
+            self.btn_export.pack_forget()
+
+    def export_session(self):
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+        default_name = f"razor_{ts}.md"
+        path = filedialog.asksaveasfilename(
+            title="Export Session",
+            initialdir=str(LOG_DIR),
+            initialfile=default_name,
+            defaultextension=".md",
+            filetypes=[("Markdown", "*.md"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        self._write_md(Path(path))
+        self._last_export_count = len(self.session_log)
+        self._update_export_btn()
+
+    def _write_md(self, path: Path):
+        now   = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        done  = [e for e in self.session_log if e["completed"]]
+        undone = [e for e in self.session_log if not e["completed"]]
+        lines = [
+            f"# Razor Session — {now}\n",
+            f"**{len(done)} completed / {len(self.session_log)} declared**\n",
+        ]
+        if done:
+            lines.append("\n## Completed\n")
+            for e in done:
+                t = e["declared_at"][:16].replace("T", " ") if e["declared_at"] else "—"
+                lines.append(f"- [x] {e['task']}  *(started {t})*")
+        if undone:
+            lines.append("\n## Not Completed\n")
+            for e in undone:
+                t = e["declared_at"][:16].replace("T", " ") if e["declared_at"] else "—"
+                lines.append(f"- [ ] {e['task']}  *(started {t})*")
+        path.write_text("\n".join(lines), encoding="utf-8")
+
+    # ── Quit ──────────────────────────────────────────────────────────────────
+
+    def _quit(self):
+        if self._has_unexported():
+            self._show_quit_dialog()
+        else:
+            self._close()
+
+    def _show_quit_dialog(self):
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Unsaved Session")
+        dlg.geometry("280x130")
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        dlg.configure(fg_color=C["bg"])
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text="Export session log before closing?",
+                     font=("Arial", 11), text_color=C["text"],
+                     wraplength=240).pack(pady=(16, 10))
+
+        brow = ctk.CTkFrame(dlg, fg_color="transparent")
+        brow.pack()
+
+        def export_and_close():
+            dlg.destroy()
+            self.export_session()
+            if not self._has_unexported():
+                self._close()
+
+        ctk.CTkButton(brow, text="Export & Close", width=110,
+                      fg_color=C["done"], hover_color="#307830",
+                      font=("Arial", 10),
+                      command=export_and_close).pack(side="left", padx=4)
+
+        ctk.CTkButton(brow, text="Close Anyway", width=110,
+                      fg_color=C["dim"], hover_color="#3a3a6a",
+                      text_color=C["muted"], font=("Arial", 10),
+                      command=lambda: [dlg.destroy(), self._close()]).pack(side="left", padx=4)
+
+    def _close(self):
+        self.running = False
+        self._save_config()
+        self.destroy()
 
     def _desktop_notify(self):
         if self.phase == "work":
@@ -393,7 +693,6 @@ class RazorTimer(ctk.CTk):
                 self._save_config()
                 play_sound(path)
             else:
-                # Revert dropdown if cancelled
                 saved = self.cfg.get("sound", "beep")
                 self.sound_var.set(saved if saved in ("beep", "silent") else "custom...")
         else:
@@ -434,11 +733,6 @@ class RazorTimer(ctk.CTk):
     def _fmt(seconds):
         m, s = divmod(seconds, 60)
         return f"{m:02d}:{s:02d}"
-
-    def _quit(self):
-        self.running = False
-        self._save_config()
-        self.destroy()
 
 
 if __name__ == "__main__":

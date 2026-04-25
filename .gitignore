@@ -1,0 +1,12 @@
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+config.json
+razor.ico
+test_sound.wav
+_NOUS/
+CLAUDE.md
+*.egg-info/
+.eggs/

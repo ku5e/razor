@@ -204,9 +204,10 @@ class RazorTimer(ctk.CTk):
         self.configure(fg_color=C["bg"])
         self.geometry(f"300x560+{self.cfg['window_x']}+{self.cfg['window_y']}")
         self._dx = self._dy = 0
-        # macOS: overrideredirect windows don't auto-focus — force it after render
+        # macOS: overrideredirect windows don't auto-focus on click — force on every click
         if platform.system() == "Darwin":
             self.after(150, lambda: [self.lift(), self.focus_force()])
+            self.bind("<Button-1>", lambda e: self.focus_force(), add="+")
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -722,6 +723,9 @@ class RazorTimer(ctk.CTk):
         # Store offset from window origin to cursor in screen coordinates
         self._dx = e.x_root - self.winfo_x()
         self._dy = e.y_root - self.winfo_y()
+        # macOS: grab_set forces all mouse events to route here during drag
+        # so the OS can't drop motion events when the window moves under the pointer
+        self.grab_set()
 
     def _drag_move(self, e):
         # Use screen-absolute coordinates — widget-relative coords shift as window moves
@@ -730,6 +734,7 @@ class RazorTimer(ctk.CTk):
         self.geometry(f"+{x}+{y}")
 
     def _drag_stop(self, e):
+        self.grab_release()
         self.cfg["window_x"] = self.winfo_x()
         self.cfg["window_y"] = self.winfo_y()
         self._save_config()

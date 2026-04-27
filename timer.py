@@ -239,11 +239,19 @@ class RazorTimer(ctk.CTk):
         self._dx = self._dy = 0
         self._dragging = False
         if platform.system() == "Darwin":
-            # Activate app once so clicks land on widgets without a focus-first click.
             # Drag stop is handled by CGEventSourceButtonState in _drag_poll — no
             # window-level ButtonRelease binding needed (macOS generates synthetic
             # releases when the window moves, which would kill the drag mid-flight).
+            #
+            # Buttons don't respond to a bare click when the app lost activation
+            # (e.g. user switched to terminal). macOS consumes that click to re-activate
+            # rather than forwarding it to the widget. Fix: pre-activate on every
+            # <Enter> event so the app is already active before the user clicks.
+            def _mac_ensure_active(e=None):
+                _mac_activate()
+                self.focus_force()
             self.after(150, lambda: [_mac_activate(), self.lift(), self.focus_force()])
+            self.bind_all("<Enter>", lambda e: _mac_ensure_active(), add="+")
         else:
             self.bind("<ButtonRelease-1>", self._drag_stop_window, add="+")
         self.bind("<B1-Motion>", self._drag_move, add="+")

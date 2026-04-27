@@ -228,7 +228,9 @@ class RazorTimer(ctk.CTk):
         for w in (self.bar,):
             w.bind("<ButtonPress-1>", self._drag_start)
             w.bind("<B1-Motion>", self._drag_move)
-            w.bind("<ButtonRelease-1>", self._drag_stop)
+            # No ButtonRelease-1 here — macOS fires a synthetic release on the bar
+            # when the window moves out from under the pointer, killing the drag.
+            # The window-level _drag_stop_window handles the real release.
 
         lbl = ctk.CTkLabel(self.bar, text="● RAZOR",
                            font=("Courier New", 11, "bold"), text_color=C["text"])
@@ -731,10 +733,6 @@ class RazorTimer(ctk.CTk):
         self._drag_poll()
 
     def _drag_poll(self):
-        # Poll pointer position directly instead of relying on B1-Motion events.
-        # macOS suspends event delivery to frameless windows mid-move, dropping
-        # B1-Motion silently. winfo_pointerx/y query the display server directly
-        # and are immune to that suspension.
         if not self._dragging:
             return
         x = self.winfo_pointerx() - self._dx
@@ -743,8 +741,6 @@ class RazorTimer(ctk.CTk):
         self.after(8, self._drag_poll)
 
     def _drag_move(self, e):
-        # No-op — polling handles movement. Binding kept so _drag_start
-        # still fires correctly on the bar widget.
         pass
 
     def _drag_stop(self, e):
@@ -753,6 +749,8 @@ class RazorTimer(ctk.CTk):
         self.cfg["window_y"] = self.winfo_y()
 
     def _drag_stop_window(self, e):
+        # Sole release handler — bar-level binding removed to avoid macOS
+        # synthetic mouse-up events killing the drag mid-move
         if self._dragging:
             self._drag_stop(e)
         self._save_config()

@@ -726,15 +726,26 @@ class RazorTimer(ctk.CTk):
 
     def _drag_start(self, e):
         self._dragging = True
-        self._dx = e.x_root - self.winfo_x()
-        self._dy = e.y_root - self.winfo_y()
+        self._dx = self.winfo_pointerx() - self.winfo_x()
+        self._dy = self.winfo_pointery() - self.winfo_y()
+        self._drag_poll()
 
-    def _drag_move(self, e):
+    def _drag_poll(self):
+        # Poll pointer position directly instead of relying on B1-Motion events.
+        # macOS suspends event delivery to frameless windows mid-move, dropping
+        # B1-Motion silently. winfo_pointerx/y query the display server directly
+        # and are immune to that suspension.
         if not self._dragging:
             return
-        x = e.x_root - self._dx
-        y = e.y_root - self._dy
+        x = self.winfo_pointerx() - self._dx
+        y = self.winfo_pointery() - self._dy
         self.geometry(f"+{x}+{y}")
+        self.after(8, self._drag_poll)
+
+    def _drag_move(self, e):
+        # No-op — polling handles movement. Binding kept so _drag_start
+        # still fires correctly on the bar widget.
+        pass
 
     def _drag_stop(self, e):
         self._dragging = False
@@ -742,7 +753,6 @@ class RazorTimer(ctk.CTk):
         self.cfg["window_y"] = self.winfo_y()
 
     def _drag_stop_window(self, e):
-        # Window-level release handler — clears drag state if the bar handler missed it
         if self._dragging:
             self._drag_stop(e)
         self._save_config()

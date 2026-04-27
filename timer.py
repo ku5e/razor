@@ -30,6 +30,39 @@ except ImportError:
 import os
 import sys
 
+# ── macOS helpers ─────────────────────────────────────────────────────────────
+
+# Direct hardware query: is the left mouse button physically pressed?
+# CoreGraphics reads from the HID layer — synthetic Tk events cannot affect it.
+_CGEventSourceButtonState = None
+if platform.system() == "Darwin":
+    try:
+        import ctypes as _ct
+        _cg = _ct.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        _cg.CGEventSourceButtonState.restype = _ct.c_bool
+        _cg.CGEventSourceButtonState.argtypes = [_ct.c_int32, _ct.c_uint32]
+        _CGEventSourceButtonState = _cg.CGEventSourceButtonState
+    except Exception:
+        pass
+
+
+def _mac_activate():
+    """Make this process the active macOS app so clicks register without focus-first."""
+    try:
+        import ctypes, ctypes.util
+        objc = ctypes.CDLL(ctypes.util.find_library("objc"))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.objc_msgSend.restype = ctypes.c_void_p
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        cls = objc.objc_getClass(b"NSApplication")
+        app = objc.objc_msgSend(cls, objc.sel_registerName(b"sharedApplication"))
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
+        objc.objc_msgSend(app, objc.sel_registerName(b"activateIgnoringOtherApps:"), True)
+    except Exception:
+        pass
+
+
 def _config_dir() -> Path:
     if platform.system() == "Windows":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
@@ -205,14 +238,15 @@ class RazorTimer(ctk.CTk):
         self.geometry(f"300x560+{self.cfg['window_x']}+{self.cfg['window_y']}")
         self._dx = self._dy = 0
         self._dragging = False
-        # macOS: overrideredirect windows don't auto-focus on click — force on every click
         if platform.system() == "Darwin":
-            self.after(150, lambda: [self.lift(), self.focus_force()])
-            self.bind("<Button-1>", lambda e: self.focus_force(), add="+")
-        # Bind motion and release at window level so events don't drop when
-        # the pointer leaves the bar widget mid-drag (macOS overrideredirect issue)
+            # Activate app once so clicks land on widgets without a focus-first click.
+            # Drag stop is handled by CGEventSourceButtonState in _drag_poll — no
+            # window-level ButtonRelease binding needed (macOS generates synthetic
+            # releases when the window moves, which would kill the drag mid-flight).
+            self.after(150, lambda: [_mac_activate(), self.lift(), self.focus_force()])
+        else:
+            self.bind("<ButtonRelease-1>", self._drag_stop_window, add="+")
         self.bind("<B1-Motion>", self._drag_move, add="+")
-        self.bind("<ButtonRelease-1>", self._drag_stop_window, add="+")
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -735,6 +769,13 @@ class RazorTimer(ctk.CTk):
     def _drag_poll(self):
         if not self._dragging:
             return
+        # On macOS, read hardware button state directly.  Synthetic ButtonRelease
+        # events generated when the window moves cannot affect a hardware HID query.
+        if _CGEventSourceButtonState is not None:
+            if not _CGEventSourceButtonState(1, 0):  # kCGEventSourceStateHIDSystemState=1, left=0
+                self._drag_stop(None)
+                self._save_config()
+                return
         x = self.winfo_pointerx() - self._dx
         y = self.winfo_pointery() - self._dy
         self.geometry(f"+{x}+{y}")

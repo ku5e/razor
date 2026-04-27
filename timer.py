@@ -204,10 +204,15 @@ class RazorTimer(ctk.CTk):
         self.configure(fg_color=C["bg"])
         self.geometry(f"300x560+{self.cfg['window_x']}+{self.cfg['window_y']}")
         self._dx = self._dy = 0
+        self._dragging = False
         # macOS: overrideredirect windows don't auto-focus on click — force on every click
         if platform.system() == "Darwin":
             self.after(150, lambda: [self.lift(), self.focus_force()])
             self.bind("<Button-1>", lambda e: self.focus_force(), add="+")
+        # Bind motion and release at window level so events don't drop when
+        # the pointer leaves the bar widget mid-drag (macOS overrideredirect issue)
+        self.bind("<B1-Motion>", self._drag_move, add="+")
+        self.bind("<ButtonRelease-1>", self._drag_stop_window, add="+")
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -720,23 +725,26 @@ class RazorTimer(ctk.CTk):
     # ── Drag ──────────────────────────────────────────────────────────────────
 
     def _drag_start(self, e):
-        # Store offset from window origin to cursor in screen coordinates
+        self._dragging = True
         self._dx = e.x_root - self.winfo_x()
         self._dy = e.y_root - self.winfo_y()
-        # macOS: grab_set forces all mouse events to route here during drag
-        # so the OS can't drop motion events when the window moves under the pointer
-        self.grab_set()
 
     def _drag_move(self, e):
-        # Use screen-absolute coordinates — widget-relative coords shift as window moves
+        if not self._dragging:
+            return
         x = e.x_root - self._dx
         y = e.y_root - self._dy
         self.geometry(f"+{x}+{y}")
 
     def _drag_stop(self, e):
-        self.grab_release()
+        self._dragging = False
         self.cfg["window_x"] = self.winfo_x()
         self.cfg["window_y"] = self.winfo_y()
+
+    def _drag_stop_window(self, e):
+        # Window-level release handler — clears drag state if the bar handler missed it
+        if self._dragging:
+            self._drag_stop(e)
         self._save_config()
 
     # ── Util ──────────────────────────────────────────────────────────────────

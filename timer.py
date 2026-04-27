@@ -300,13 +300,20 @@ class RazorTimer(ctk.CTk):
         self._dx = self._dy = 0
         self._dragging = False
         if platform.system() == "Darwin":
-            # Patch TKWindow so canBecomeKeyWindow returns YES — prevents macOS
-            # from consuming the first click on the window for activation.
-            # Drag stop is handled by CGEventSourceButtonState in _drag_poll —
-            # no ButtonRelease binding needed (macOS generates synthetic releases
-            # when the window moves, which would kill the drag mid-flight).
+            # Patch TKWindow/TKContentView so clicks reach widgets directly.
             _mac_patch_window()
             self.after(150, lambda: [_mac_activate(), self.lift(), self.focus_force()])
+            # On macOS with overrideredirect, Tk does not reliably deliver
+            # ButtonRelease-1 to the widget that received ButtonPress-1 unless
+            # a B1-Motion event was also seen for that widget.  Generate a
+            # synthetic zero-pixel motion immediately after every press so Tk
+            # commits the widget as the drag target and routes the release to it.
+            def _mac_fake_motion(e):
+                try:
+                    e.widget.event_generate("<B1-Motion>", x=e.x, y=e.y, state=0x100)
+                except Exception:
+                    pass
+            self.bind_all("<ButtonPress-1>", _mac_fake_motion, add="+")
         else:
             self.bind("<ButtonRelease-1>", self._drag_stop_window, add="+")
         self.bind("<B1-Motion>", self._drag_move, add="+")

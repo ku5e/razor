@@ -51,18 +51,21 @@ _mac_imp_ref = None
 
 def _mac_patch_window():
     """
-    Patch TKWindow.canBecomeKeyWindow to return YES via the ObjC runtime.
+    Patch Tk's ObjC classes so clicks reach widgets on first press.
 
-    overrideredirect(True) strips the title bar by setting the window style
-    mask to 0 (NSWindowStyleMaskBorderless).  A borderless NSWindow returns NO
-    from canBecomeKeyWindow by default, so macOS consumes the first click on
-    the window to activate it instead of forwarding the event to Tk.  The
-    widget sees ButtonRelease without a prior ButtonPress and ignores it.
+    Two separate problems require two separate patches:
 
-    Replacing canBecomeKeyWindow on TKWindow (the class Tk uses for every
-    window on macOS) tells macOS this window can always become the key window,
-    so it never needs to eat a click for activation.  First click goes straight
-    to the widget.
+    1. TKWindow.canBecomeKeyWindow — overrideredirect sets the style mask to
+       NSWindowStyleMaskBorderless (0), which makes canBecomeKeyWindow return NO.
+       Patching it to YES lets the window become key normally.
+
+    2. TKContentView.acceptsFirstMouse: — this is the actual gate. Even with
+       canBecomeKeyWindow returning YES, macOS still consumes the first click on
+       an inactive window for activation and does NOT forward it to the view.
+       acceptsFirstMouse: returning YES tells macOS to deliver the mouseDown
+       directly to the content view regardless of window activation state.
+       Without this, widgets see ButtonRelease without a prior ButtonPress and
+       ignore the click entirely.
     """
     global _mac_imp_ref
     if platform.system() != "Darwin":
@@ -76,14 +79,30 @@ def _mac_patch_window():
         objc.class_replaceMethod.argtypes = [
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p
         ]
-        yes_imp = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(
-            lambda s, c: True
-        )
-        _mac_imp_ref = yes_imp  # prevent GC
+
+        # BOOL return, no extra args — used for canBecomeKeyWindow / canBecomeMainWindow
+        bool_imp = ctypes.CFUNCTYPE(
+            ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p
+        )(lambda s, c: True)
+
+        # BOOL return, one object arg (NSEvent*) — used for acceptsFirstMouse:
+        bool_event_imp = ctypes.CFUNCTYPE(
+            ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+        )(lambda s, c, e: True)
+
+        _mac_imp_ref = (bool_imp, bool_event_imp)  # prevent GC
+
         cls = objc.objc_getClass(b"TKWindow")
         if cls:
             for name in (b"canBecomeKeyWindow", b"canBecomeMainWindow"):
-                objc.class_replaceMethod(cls, objc.sel_registerName(name), yes_imp, b"c@:")
+                objc.class_replaceMethod(cls, objc.sel_registerName(name), bool_imp, b"c@:")
+
+        # TKContentView is the NSView subclass Tk uses as the window's content view.
+        cls = objc.objc_getClass(b"TKContentView")
+        if cls:
+            objc.class_replaceMethod(
+                cls, objc.sel_registerName(b"acceptsFirstMouse:"), bool_event_imp, b"c@:@"
+            )
     except Exception:
         pass
 

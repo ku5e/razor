@@ -127,7 +127,8 @@ class _DeclarationDialog(ctk.CTkToplevel):
         if prefill:
             self.entry.insert(0, prefill)
             self.entry.select_range(0, "end")
-        self.entry.focus()
+        # macOS: delay focus_force so the toplevel window is fully rendered first
+        self.after(100, self.entry.focus_force)
         self.entry.bind("<Return>", lambda e: self._confirm())
         self.entry.bind("<Escape>", lambda e: self._skip())
 
@@ -203,6 +204,9 @@ class RazorTimer(ctk.CTk):
         self.configure(fg_color=C["bg"])
         self.geometry(f"300x560+{self.cfg['window_x']}+{self.cfg['window_y']}")
         self._dx = self._dy = 0
+        # macOS: overrideredirect windows don't auto-focus — force it after render
+        if platform.system() == "Darwin":
+            self.after(150, lambda: [self.lift(), self.focus_force()])
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -715,11 +719,14 @@ class RazorTimer(ctk.CTk):
     # ── Drag ──────────────────────────────────────────────────────────────────
 
     def _drag_start(self, e):
-        self._dx, self._dy = e.x, e.y
+        # Store offset from window origin to cursor in screen coordinates
+        self._dx = e.x_root - self.winfo_x()
+        self._dy = e.y_root - self.winfo_y()
 
     def _drag_move(self, e):
-        x = self.winfo_x() + e.x - self._dx
-        y = self.winfo_y() + e.y - self._dy
+        # Use screen-absolute coordinates — widget-relative coords shift as window moves
+        x = e.x_root - self._dx
+        y = e.y_root - self._dy
         self.geometry(f"+{x}+{y}")
 
     def _drag_stop(self, e):

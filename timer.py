@@ -311,52 +311,63 @@ class RazorTimer(ctk.CTk):
             def _mac_click_fix(e):
                 """
                 On macOS with overrideredirect, ButtonRelease-1 is swallowed for
-                static clicks because macOS has no drag-tracking session active.
-                Poll hardware button state after each press; if the natural
-                ButtonRelease never arrives at the target widget within 50 ms of
-                the physical release, inject a synthetic one so CTkButton fires.
-                The 50 ms grace window prevents double-fire on the movement case
-                where the natural release does arrive via drag tracking.
+                static clicks (no drag-tracking session active). The press also
+                lands on an unresolved root path, so CTkButton never sets its
+                pressed state. Poll hardware button state after each press; if
+                the natural events never arrive at the target widget within 50 ms
+                of the physical release, inject the full press+release sequence.
+                50 ms grace window prevents double-fire when movement is involved
+                and drag tracking delivers natural events normally.
                 """
-                if not _CGEventSourceButtonState:
-                    return
-                target = self.winfo_containing(e.x_root, e.y_root)
-                if target is None:
-                    return
-                wx = e.x_root - target.winfo_rootx()
-                wy = e.y_root - target.winfo_rooty()
-                natural_fired = [False]
-
-                def _mark_natural(ev=None):
-                    natural_fired[0] = True
-
                 try:
-                    funcid = target.bind("<ButtonRelease-1>", _mark_natural, add="+")
+                    if not _CGEventSourceButtonState:
+                        return
+                    target = self.winfo_containing(e.x_root, e.y_root)
+                    if target is None:
+                        return
+                    wx = e.x_root - target.winfo_rootx()
+                    wy = e.y_root - target.winfo_rooty()
+                    natural_fired = [False]
+
+                    def _mark_natural(ev=None):
+                        natural_fired[0] = True
+
+                    try:
+                        funcid = target.bind("<ButtonRelease-1>", _mark_natural, add="+")
+                    except Exception:
+                        funcid = None
+
+                    def _inject_if_needed():
+                        if funcid:
+                            try:
+                                target.unbind("<ButtonRelease-1>", funcid)
+                            except Exception:
+                                pass
+                        if not natural_fired[0]:
+                            try:
+                                target.event_generate(
+                                    "<ButtonPress-1>", x=wx, y=wy,
+                                    rootx=e.x_root, rooty=e.y_root,
+                                )
+                                target.event_generate(
+                                    "<ButtonRelease-1>", x=wx, y=wy,
+                                    rootx=e.x_root, rooty=e.y_root,
+                                )
+                            except Exception:
+                                pass
+
+                    def _poll():
+                        try:
+                            if not _CGEventSourceButtonState(1, 0):
+                                self.after(50, _inject_if_needed)
+                            else:
+                                self.after(8, _poll)
+                        except Exception:
+                            pass
+
+                    self.after(8, _poll)
                 except Exception:
-                    funcid = None
-
-                def _inject_if_needed():
-                    if funcid:
-                        try:
-                            target.unbind("<ButtonRelease-1>", funcid)
-                        except Exception:
-                            pass
-                    if not natural_fired[0]:
-                        try:
-                            target.event_generate(
-                                "<ButtonRelease-1>", x=wx, y=wy,
-                                rootx=e.x_root, rooty=e.y_root,
-                            )
-                        except Exception:
-                            pass
-
-                def _poll():
-                    if not _CGEventSourceButtonState(1, 0):
-                        self.after(50, _inject_if_needed)
-                    else:
-                        self.after(8, _poll)
-
-                self.after(8, _poll)
+                    pass
 
             self.bind_all("<ButtonPress-1>", _mac_click_fix, add="+")
         else:

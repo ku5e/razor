@@ -308,12 +308,57 @@ class RazorTimer(ctk.CTk):
             # a B1-Motion event was also seen for that widget.  Generate a
             # synthetic zero-pixel motion immediately after every press so Tk
             # commits the widget as the drag target and routes the release to it.
-            def _mac_fake_motion(e):
+            def _mac_click_fix(e):
+                """
+                On macOS with overrideredirect, ButtonRelease-1 is swallowed for
+                static clicks because macOS has no drag-tracking session active.
+                Poll hardware button state after each press; if the natural
+                ButtonRelease never arrives at the target widget within 50 ms of
+                the physical release, inject a synthetic one so CTkButton fires.
+                The 50 ms grace window prevents double-fire on the movement case
+                where the natural release does arrive via drag tracking.
+                """
+                if not _CGEventSourceButtonState:
+                    return
+                target = self.winfo_containing(e.x_root, e.y_root)
+                if target is None:
+                    return
+                wx = e.x_root - target.winfo_rootx()
+                wy = e.y_root - target.winfo_rooty()
+                natural_fired = [False]
+
+                def _mark_natural(ev=None):
+                    natural_fired[0] = True
+
                 try:
-                    e.widget.event_generate("<B1-Motion>", x=e.x, y=e.y, state=0x100)
+                    funcid = target.bind("<ButtonRelease-1>", _mark_natural, add="+")
                 except Exception:
-                    pass
-            self.bind_all("<ButtonPress-1>", _mac_fake_motion, add="+")
+                    funcid = None
+
+                def _inject_if_needed():
+                    if funcid:
+                        try:
+                            target.unbind("<ButtonRelease-1>", funcid)
+                        except Exception:
+                            pass
+                    if not natural_fired[0]:
+                        try:
+                            target.event_generate(
+                                "<ButtonRelease-1>", x=wx, y=wy,
+                                rootx=e.x_root, rooty=e.y_root,
+                            )
+                        except Exception:
+                            pass
+
+                def _poll():
+                    if not _CGEventSourceButtonState(1, 0):
+                        self.after(50, _inject_if_needed)
+                    else:
+                        self.after(8, _poll)
+
+                self.after(8, _poll)
+
+            self.bind_all("<ButtonPress-1>", _mac_click_fix, add="+")
         else:
             self.bind("<ButtonRelease-1>", self._drag_stop_window, add="+")
         self.bind("<B1-Motion>", self._drag_move, add="+")

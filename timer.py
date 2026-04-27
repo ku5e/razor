@@ -45,19 +45,61 @@ if platform.system() == "Darwin":
     except Exception:
         pass
 
+# Keep a reference so the ctypes callback isn't garbage-collected.
+_mac_imp_ref = None
 
-def _mac_activate():
-    """Make this process the active macOS app so clicks register without focus-first."""
+
+def _mac_patch_window():
+    """
+    Patch TKWindow.canBecomeKeyWindow to return YES via the ObjC runtime.
+
+    overrideredirect(True) strips the title bar by setting the window style
+    mask to 0 (NSWindowStyleMaskBorderless).  A borderless NSWindow returns NO
+    from canBecomeKeyWindow by default, so macOS consumes the first click on
+    the window to activate it instead of forwarding the event to Tk.  The
+    widget sees ButtonRelease without a prior ButtonPress and ignores it.
+
+    Replacing canBecomeKeyWindow on TKWindow (the class Tk uses for every
+    window on macOS) tells macOS this window can always become the key window,
+    so it never needs to eat a click for activation.  First click goes straight
+    to the widget.
+    """
+    global _mac_imp_ref
+    if platform.system() != "Darwin":
+        return
     try:
         import ctypes, ctypes.util
         objc = ctypes.CDLL(ctypes.util.find_library("objc"))
-        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.restype        = ctypes.c_void_p
+        objc.sel_registerName.restype     = ctypes.c_void_p
+        objc.class_replaceMethod.restype  = ctypes.c_void_p
+        objc.class_replaceMethod.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p
+        ]
+        yes_imp = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(
+            lambda s, c: True
+        )
+        _mac_imp_ref = yes_imp  # prevent GC
+        cls = objc.objc_getClass(b"TKWindow")
+        if cls:
+            for name in (b"canBecomeKeyWindow", b"canBecomeMainWindow"):
+                objc.class_replaceMethod(cls, objc.sel_registerName(name), yes_imp, b"c@:")
+    except Exception:
+        pass
+
+
+def _mac_activate():
+    """Bring this process to the front on macOS."""
+    try:
+        import ctypes, ctypes.util
+        objc = ctypes.CDLL(ctypes.util.find_library("objc"))
+        objc.objc_getClass.restype    = ctypes.c_void_p
         objc.sel_registerName.restype = ctypes.c_void_p
-        objc.objc_msgSend.restype = ctypes.c_void_p
-        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        objc.objc_msgSend.restype     = ctypes.c_void_p
+        objc.objc_msgSend.argtypes    = [ctypes.c_void_p, ctypes.c_void_p]
         cls = objc.objc_getClass(b"NSApplication")
         app = objc.objc_msgSend(cls, objc.sel_registerName(b"sharedApplication"))
-        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
+        objc.objc_msgSend.argtypes    = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
         objc.objc_msgSend(app, objc.sel_registerName(b"activateIgnoringOtherApps:"), True)
     except Exception:
         pass
@@ -239,19 +281,13 @@ class RazorTimer(ctk.CTk):
         self._dx = self._dy = 0
         self._dragging = False
         if platform.system() == "Darwin":
-            # Drag stop is handled by CGEventSourceButtonState in _drag_poll — no
-            # window-level ButtonRelease binding needed (macOS generates synthetic
-            # releases when the window moves, which would kill the drag mid-flight).
-            #
-            # Buttons don't respond to a bare click when the app lost activation
-            # (e.g. user switched to terminal). macOS consumes that click to re-activate
-            # rather than forwarding it to the widget. Fix: pre-activate on every
-            # <Enter> event so the app is already active before the user clicks.
-            def _mac_ensure_active(e=None):
-                _mac_activate()
-                self.focus_force()
+            # Patch TKWindow so canBecomeKeyWindow returns YES — prevents macOS
+            # from consuming the first click on the window for activation.
+            # Drag stop is handled by CGEventSourceButtonState in _drag_poll —
+            # no ButtonRelease binding needed (macOS generates synthetic releases
+            # when the window moves, which would kill the drag mid-flight).
+            _mac_patch_window()
             self.after(150, lambda: [_mac_activate(), self.lift(), self.focus_force()])
-            self.bind_all("<Enter>", lambda e: _mac_ensure_active(), add="+")
         else:
             self.bind("<ButtonRelease-1>", self._drag_stop_window, add="+")
         self.bind("<B1-Motion>", self._drag_move, add="+")

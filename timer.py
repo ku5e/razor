@@ -303,73 +303,84 @@ class RazorTimer(ctk.CTk):
             # Patch TKWindow/TKContentView so clicks reach widgets directly.
             _mac_patch_window()
             self.after(150, lambda: [_mac_activate(), self.lift(), self.focus_force()])
-            # On macOS with overrideredirect, Tk does not reliably deliver
-            # ButtonRelease-1 to the widget that received ButtonPress-1 unless
-            # a B1-Motion event was also seen for that widget.  Generate a
-            # synthetic zero-pixel motion immediately after every press so Tk
-            # commits the widget as the drag target and routes the release to it.
-            def _mac_click_fix(e):
-                """
-                On macOS with overrideredirect, ButtonRelease-1 is swallowed for
-                static clicks (no drag-tracking session active). The press also
-                lands on an unresolved root path, so CTkButton never sets its
-                pressed state. Poll hardware button state after each press; if
-                the natural events never arrive at the target widget within 50 ms
-                of the physical release, inject the full press+release sequence.
-                50 ms grace window prevents double-fire when movement is involved
-                and drag tracking delivers natural events normally.
-                """
+
+            # macOS borderless-window click fix.
+            #
+            # Root cause: with overrideredirect(True), ButtonPress-1 never
+            # reaches child widgets (CTkButton's internal canvas) for static
+            # clicks.  Moving during a click creates B1-Motion which
+            # establishes widget tracking — that's why drags work.
+            #
+            # Tk events are unreliable here, so we bypass them entirely.
+            # Poll CGEventSourceButtonState (hardware HID layer) on the
+            # main thread every 8 ms.  On press → record position (if
+            # inside our window).  On release → if cursor barely moved
+            # (static click), invoke the widget at the press position.
+            # If cursor moved (drag), natural routing already handled it.
+
+            self._hw_press_pos = None  # (x, y) in screen coords, or None
+
+            def _find_and_invoke(x_root, y_root):
                 try:
-                    if not _CGEventSourceButtonState:
+                    w = self.winfo_containing(x_root, y_root)
+                    if w is None:
                         return
-                    target = self.winfo_containing(e.x_root, e.y_root)
-                    if target is None:
-                        return
-                    wx = e.x_root - target.winfo_rootx()
-                    wy = e.y_root - target.winfo_rooty()
-                    natural_fired = [False]
-
-                    def _mark_natural(ev=None):
-                        natural_fired[0] = True
-
-                    try:
-                        funcid = target.bind("<ButtonRelease-1>", _mark_natural, add="+")
-                    except Exception:
-                        funcid = None
-
-                    def _inject_if_needed():
-                        if funcid:
-                            try:
-                                target.unbind("<ButtonRelease-1>", funcid)
-                            except Exception:
-                                pass
-                        if not natural_fired[0]:
-                            try:
-                                target.event_generate(
-                                    "<ButtonPress-1>", x=wx, y=wy,
-                                    rootx=e.x_root, rooty=e.y_root,
-                                )
-                                target.event_generate(
-                                    "<ButtonRelease-1>", x=wx, y=wy,
-                                    rootx=e.x_root, rooty=e.y_root,
-                                )
-                            except Exception:
-                                pass
-
-                    def _poll():
+                    origin = w
+                    for _ in range(6):
+                        if hasattr(w, 'invoke') and hasattr(w, '_command'):
+                            w.invoke()
+                            return
                         try:
-                            if not _CGEventSourceButtonState(1, 0):
-                                self.after(50, _inject_if_needed)
-                            else:
-                                self.after(8, _poll)
+                            w = w.nametowidget(w.winfo_parent())
                         except Exception:
-                            pass
-
-                    self.after(8, _poll)
+                            break
+                    # No CTkButton found — send a raw press+release so
+                    # entry fields, checkboxes, and option menus still work.
+                    lx = x_root - origin.winfo_rootx()
+                    ly = y_root - origin.winfo_rooty()
+                    origin.event_generate(
+                        "<ButtonPress-1>", x=lx, y=ly,
+                        rootx=x_root, rooty=y_root,
+                    )
+                    origin.event_generate(
+                        "<ButtonRelease-1>", x=lx, y=ly,
+                        rootx=x_root, rooty=y_root,
+                    )
                 except Exception:
                     pass
 
-            self.bind_all("<ButtonPress-1>", _mac_click_fix, add="+")
+            _hw_was_pressed = [False]
+
+            def _hw_poll():
+                if not _CGEventSourceButtonState:
+                    return
+                self.after(8, _hw_poll)
+                try:
+                    pressed = bool(_CGEventSourceButtonState(1, 0))
+                    if pressed and not _hw_was_pressed[0]:
+                        # Press detected — record position unconditionally.
+                        # winfo_containing scopes to our Tk hierarchy, so
+                        # clicks outside all our windows will return None
+                        # and _find_and_invoke will silently bail.
+                        self._hw_press_pos = (
+                            self.winfo_pointerx(),
+                            self.winfo_pointery(),
+                        )
+                    elif not pressed and _hw_was_pressed[0]:
+                        # Release detected.
+                        if self._hw_press_pos is not None:
+                            px, py = self._hw_press_pos
+                            self._hw_press_pos = None
+                            cx = self.winfo_pointerx()
+                            cy = self.winfo_pointery()
+                            # Static click threshold: ≤ 8 px movement.
+                            if abs(cx - px) <= 8 and abs(cy - py) <= 8:
+                                _find_and_invoke(px, py)
+                    _hw_was_pressed[0] = pressed
+                except Exception:
+                    pass
+
+            self.after(8, _hw_poll)
         else:
             self.bind("<ButtonRelease-1>", self._drag_stop_window, add="+")
         self.bind("<B1-Motion>", self._drag_move, add="+")
